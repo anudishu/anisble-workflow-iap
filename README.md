@@ -105,6 +105,67 @@ ansible-playbook -i hosts.runtime.yml playbooks/golden-image-rhel9.yml
 
 ---
 
+## 📋 Setup Flow Overview
+
+```
+FIRST-TIME SETUP (One Time)
+═══════════════════════════════════════════════════════════════
+
+1. Generate SSH Key Pair
+   ├─→ Private Key: ~/.ssh/ansible_test_key (keep secret!)
+   └─→ Public Key: ~/.ssh/ansible_test_key.pub (add to VM)
+
+2. Enable Google Cloud APIs
+   └─→ Compute, Cloud Build, Workflows, Secret Manager, IAP
+
+3. Create Service Account
+   └─→ ansible-automation@PROJECT_ID.iam.gserviceaccount.com
+
+4. Grant IAM Permissions (7 roles)
+   ├─→ Cloud Build Editor
+   ├─→ Compute Instance Admin
+   ├─→ IAP Tunnel Resource Accessor
+   ├─→ Secret Manager Accessor
+   ├─→ Storage Object Admin
+   ├─→ Logging Writer
+   └─→ Service Account User
+
+5. Store SSH Private Key in Secret Manager
+   └─→ Secret: ansible-ssh-private-key (encrypted)
+
+6. Configure Cloud NAT
+   └─→ Provides VM internet access (for package downloads)
+
+7. Create Target VM
+   ├─→ No external IP (security)
+   └─→ Add public SSH key to VM metadata
+
+8. Deploy Workflow
+   └─→ Upload workflow definition to Google Cloud
+
+═══════════════════════════════════════════════════════════════
+
+DAILY USAGE (Anytime)
+═══════════════════════════════════════════════════════════════
+
+One command to deploy:
+$ gcloud workflows run ansible-cloudbuild-workflow \
+    --data='{"playbook":"golden-image-rhel9.yml"}' \
+    --location=us-central1
+
+All automation happens:
+  ✓ Code pulled from GitHub
+  ✓ SSH key retrieved from Secret Manager
+  ✓ IAP tunnel established
+  ✓ Ansible deployed
+  ✓ Validation run
+  ✓ Results returned
+
+═══════════════════════════════════════════════════════════════
+```
+
+---
+
 ## 🚀 Complete Setup Guide
 
 ### Prerequisites
@@ -113,7 +174,41 @@ ansible-playbook -i hosts.runtime.yml playbooks/golden-image-rhel9.yml
 # Set project
 export PROJECT_ID="probable-cove-474504-p0"
 gcloud config set project $PROJECT_ID
+
+# Set service account email (will be created in Step 2)
+export SA_EMAIL="ansible-automation@${PROJECT_ID}.iam.gserviceaccount.com"
 ```
+
+---
+
+### 🔑 Quick Setup: SSH Key Generation (First-Time Setup)
+
+If you don't have an SSH key yet, generate one first:
+
+```bash
+# 1. Generate SSH key pair (choose one method)
+# Method A: ED25519 (recommended - more secure, faster)
+ssh-keygen -t ed25519 -f ~/.ssh/ansible_test_key -C "ansible-automation" -N ""
+
+# Method B: RSA 4096 (traditional, widely supported)
+ssh-keygen -t rsa -b 4096 -f ~/.ssh/ansible_test_key -C "ansible-automation" -N ""
+
+# 2. Verify keys were created
+ls -lh ~/.ssh/ansible_test_key*
+# Output:
+# ansible_test_key       <- Private key (keep secret!)
+# ansible_test_key.pub   <- Public key (safe to share)
+
+# 3. View public key (you'll need this later)
+cat ~/.ssh/ansible_test_key.pub
+```
+
+**💡 Key Points:**
+- **Private key** (`ansible_test_key`): Never share! Will be stored in Secret Manager
+- **Public key** (`ansible_test_key.pub`): Added to VM metadata for SSH access
+- **No passphrase** (`-N ""`): Required for automated deployments
+
+---
 
 ### Step 1: Enable Required APIs
 
@@ -177,7 +272,40 @@ gcloud iam service-accounts add-iam-policy-binding ${SA_EMAIL} \
   --role="roles/iam.serviceAccountUser"
 ```
 
-### Step 4: Store SSH Key in Secret Manager
+### Step 4: Generate SSH Key and Store in Secret Manager
+
+#### 4.1: Generate SSH Key Pair
+
+```bash
+# Generate ED25519 SSH key (recommended - more secure and faster)
+ssh-keygen -t ed25519 \
+  -f "${HOME}/.ssh/ansible_test_key" \
+  -C "ansible-automation" \
+  -N ""
+
+# OR generate RSA key (if ED25519 not supported)
+ssh-keygen -t rsa -b 4096 \
+  -f "${HOME}/.ssh/ansible_test_key" \
+  -C "ansible-automation" \
+  -N ""
+
+# Verify key was created
+ls -lh ~/.ssh/ansible_test_key*
+# You should see:
+# ansible_test_key       (private key)
+# ansible_test_key.pub   (public key)
+
+# View public key (you'll need this for VM metadata)
+cat ~/.ssh/ansible_test_key.pub
+```
+
+**Parameters explained:**
+- `-t ed25519` or `-t rsa -b 4096`: Key type and size
+- `-f`: Output file path
+- `-C`: Comment (identifies the key)
+- `-N ""`: Empty passphrase (required for automation)
+
+#### 4.2: Store Private Key in Secret Manager
 
 ```bash
 # Create secret from your SSH private key
@@ -192,7 +320,16 @@ gcloud secrets add-iam-policy-binding ansible-ssh-private-key \
 
 # Verify secret was created
 gcloud secrets describe ansible-ssh-private-key
+
+# Test secret retrieval (optional)
+gcloud secrets versions access latest --secret="ansible-ssh-private-key" | head -n 1
 ```
+
+**⚠️ Security Note:**
+- Private key stored in Secret Manager (encrypted at rest)
+- Only service account can access the secret
+- Never commit private keys to Git
+- Public key is safe to share/store in VM metadata
 
 ### Step 5: Configure Cloud NAT (for VM Internet Access)
 
